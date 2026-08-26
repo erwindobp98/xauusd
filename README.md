@@ -1,1 +1,1 @@
-# xauusd
+# xauusd only windows
