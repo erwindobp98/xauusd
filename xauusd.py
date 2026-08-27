@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
     "USE_BOS": True,
     "USE_CHOCH": True,
     "USE_CONFLUENCE_CHECK": True,
-    "USE_MANDATORY_SMC": False,
+    "USE_MANDATORY_SMC": True,
     "MANDATORY_SMC_MIN_CONDITIONS": 2,
     "USE_TRAILING_SL": False,
     "TRAIL_START_PROFIT": 2.0,
@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
     "USE_CANDLE_CONFIRMATION": False,
     "CONFIRMATION_LOOKBACK": 1,
     "USE_SCORING_SYSTEM": True,
-    "MIN_SCORE_FOR_ENTRY": 7,
+    "MIN_SCORE_FOR_ENTRY": 9,
     "MAX_SCORE": 13,
     "SMC_ZONE_SENSITIVITY": 0.22,
     "SMC_MAX_ZONES": 5,
@@ -1130,8 +1130,6 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
     return Group(*parts)
 
 # ===================== MAIN LOOP =====================
-WEENfx PRO SMC SCALPER 
-
 print("=" * 60)
 print("📊 Starting Dashboard...")
 print(f"   Symbol: {SYMBOL}")
