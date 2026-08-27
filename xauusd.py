@@ -208,6 +208,12 @@ locked_buy_conditions = {}
 locked_sell_conditions = {}
 is_locked = False
 
+# ===================== ZONE LOCK (PREVENT GOCEK) =====================
+locked_demand_zones = []
+locked_supply_zones = []
+zone_locked_candle_time = None
+zone_check_price = None
+
 # ===================== CONNECT MT5 =====================
 print("⏳ Connecting to MetaTrader 5...")
 if not mt5.initialize():
@@ -443,6 +449,24 @@ def price_in_smc_zone(price, zones, zone_type=None):
         except:
             continue
     return False, None
+
+# ===================== ZONE LOCK FUNCTIONS =====================
+def lock_zones_at_candle_close(demand_zones, supply_zones, candle_time):
+    """Lock SMC zones at candle close to prevent signal flickering"""
+    global locked_demand_zones, locked_supply_zones, zone_locked_candle_time
+    locked_demand_zones = demand_zones.copy() if demand_zones else []
+    locked_supply_zones = supply_zones.copy() if supply_zones else []
+    zone_locked_candle_time = candle_time
+    return locked_demand_zones, locked_supply_zones
+
+def get_zone_check_price(df, bid):
+    """Get price for zone checking - use close price of last closed candle"""
+    global zone_check_price
+    if df is not None and not df.empty and len(df) >= 1:
+        zone_check_price = df['close'].iloc[-1]
+    else:
+        zone_check_price = bid
+    return zone_check_price
 
 def smart_liquidity_sweep(df, direction):
     if df is None or len(df) < SWEEP_LOOKBACK + 3:
@@ -924,7 +948,8 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
                           in_demand_zone, pinbar_status, wick_status, ob_status, fvg_status,
                           fakeout, daily_pnl, daily_loss_percent, trading_disabled_today,
                           buy_conditions, sell_conditions, is_locked, locked_signal,
-                          locked_buy_score, locked_sell_score, locked_candle_time):
+                          locked_buy_score, locked_sell_score, locked_candle_time,
+                          zone_locked):
     now = datetime.now(WIB).strftime("%H:%M:%S WIB")
     trade_txt = Text("● ON", style="bold green") if USE_AUTO_TRADE else Text("○ OFF", style="bold red")
     tp_txt = Text("● ON", style="green") if USE_TAKE_PROFIT else Text("○ OFF", style="red")
@@ -1005,6 +1030,7 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
     smc.add_row("Engulf", Text(f"{'✓' if engulf_buy else '✗'} / {'✓' if engulf_sell else '✗'}"))
     zone="SUPPLY" if in_supply_zone else "DEMAND" if in_demand_zone else "—"
     smc.add_row("Zone", Text(zone, style="red" if zone=="SUPPLY" else "green" if zone=="DEMAND" else "yellow"))
+    smc.add_row("ZoneLock", Text("🔒 ON" if zone_locked else "OFF", style="green" if zone_locked else "yellow"))
     smc.add_row("PinBar", rich_pattern(pinbar_status))
     smc.add_row("Reject", rich_pattern(wick_status))
     smc.add_row("OB", rich_pattern(ob_status))
@@ -1133,6 +1159,11 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
 print("=" * 60)
 print("📊 Starting Dashboard...")
 print(f"   Symbol: {SYMBOL}")
+print(f"   Entry TF: {TIMEFRAME_ENTRY}")
+print(f"   SMC TF: {TIMEFRAME_SMC}")
+print(f"   Auto Trade: {'ON' if USE_AUTO_TRADE else 'OFF'}")
+print(f"   Closed Candle Lock: {'ON' if USE_CLOSED_CANDLE_LOCK else 'OFF'}")
+print(f"   Zone Lock: {'ON' if USE_SMC_SUPPLY_DEMAND else 'OFF'}")
 print("=" * 60)
 print("⏳ Press Ctrl+C to stop")
 print("=" * 60)
@@ -1164,6 +1195,7 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
         if df_smc is not None and not df_smc.empty:
             demand_zones = detect_demand_zones(df_smc, SMC_ZONE_SENSITIVITY)
             supply_zones = detect_supply_zones(df_smc, SMC_ZONE_SENSITIVITY)
+            print(f"✅ SMC Zones loaded: {len(demand_zones)} Demand, {len(supply_zones)} Supply")
         if ATR_SL_UPDATE_ON_STARTUP and USE_ATR_SL_EXISTING:
             update_existing_positions_sl()
     except Exception as e:
@@ -1216,7 +1248,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             trend = trend_m5()
             htf_trend = get_higher_timeframe_trend() if USE_CONFLUENCE_CHECK else "SIDEWAYS"
             
-            # ✅ engulfing() masih digunakan - TIDAK DIHAPUS
             engulf_buy = engulfing(df, "BUY")
             engulf_sell = engulfing(df, "SELL")
 
@@ -1233,12 +1264,26 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             choch = detect_choch(df)
             current_bias, bias_just_changed = update_market_bias(choch, trend)
         
-            # SMC Zones - price in zone (using LIVE price)
+            # ===== SMC ZONES - WITH ZONE LOCK (PREVENT GOCEK) =====
             in_demand_zone = False
             in_supply_zone = False
-            if bid and USE_SMC_SUPPLY_DEMAND:
-                in_demand_zone, _ = price_in_smc_zone(bid, demand_zones, "DEMAND")
-                in_supply_zone, _ = price_in_smc_zone(bid, supply_zones, "SUPPLY")
+            zone_locked = False
+
+            if USE_SMC_SUPPLY_DEMAND:
+                # Lock zone di awal candle M5
+                if new_candle:
+                    current_candle_time = get_last_closed_candle_time(TIMEFRAME_ENTRY)
+                    lock_zones_at_candle_close(demand_zones, supply_zones, current_candle_time)
+                    zone_check_price = get_zone_check_price(df, bid)
+                    zone_locked = True
+                    runtime_message(f"🔒 ZONE LOCKED at {time.strftime('%H:%M', time.gmtime(current_candle_time)) if current_candle_time else '--'}")
+                
+                # Gunakan locked zone dan harga yang sudah dilock untuk seluruh candle
+                check_price = zone_check_price if zone_check_price is not None else bid
+                if check_price and locked_demand_zones:
+                    in_demand_zone, _ = price_in_smc_zone(check_price, locked_demand_zones, "DEMAND")
+                    in_supply_zone, _ = price_in_smc_zone(check_price, locked_supply_zones, "SUPPLY")
+                    zone_locked = True
         
             smart_sweep_buy = smart_liquidity_sweep(df, "BUY")
             smart_sweep_sell = smart_liquidity_sweep(df, "SELL")
@@ -1413,7 +1458,8 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 buy_conditions=buy_conditions, sell_conditions=sell_conditions,
                 is_locked=is_locked, locked_signal=locked_signal,
                 locked_buy_score=locked_buy_score, locked_sell_score=locked_sell_score,
-                locked_candle_time=locked_candle_time
+                locked_candle_time=locked_candle_time,
+                zone_locked=zone_locked
             ))
 
             time.sleep(1)
