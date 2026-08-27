@@ -63,8 +63,8 @@ DEFAULT_CONFIG = {
     "USE_CANDLE_CONFIRMATION": False,
     "CONFIRMATION_LOOKBACK": 1,
     "USE_SCORING_SYSTEM": True,
-    "MIN_SCORE_FOR_ENTRY": 9,
-    "MAX_SCORE": 13,
+    "MIN_SCORE_FOR_ENTRY": 4, # Karena hanya Sweep, Rej, Div, Zona yang masuk skor
+    "MAX_SCORE": 10, 
     "SMC_ZONE_SENSITIVITY": 0.22,
     "SMC_MAX_ZONES": 5,
     "SWEEP_LOOKBACK": 15,
@@ -139,7 +139,7 @@ def load_or_create_config(path=CONFIG_FILE):
     return merged
 
 print("=" * 60)
-print("🚀 WEENfx PRO SMC SCALPER")
+print("🚀 WEENfx PRO SMC SCALPER (FINAL LOGIC)")
 print("=" * 60)
 
 CONFIG = load_or_create_config()
@@ -572,6 +572,29 @@ def detect_fvg(df):
         return "BEAR"
     return None
 
+# ===================== NEW: DETECT DIVERGENCE =====================
+def detect_divergence(df, direction, lookback=15):
+    """Deteksi Divergence sederhana (Harga High/Low baru, tapi momentum/close tidak mengikuti)"""
+    if df is None or len(df) < lookback + 2:
+        return False
+    try:
+        closes = df['close'].tail(lookback).values
+        highs = df['high'].tail(lookback).values
+        lows = df['low'].tail(lookback).values
+        
+        last_price = df['close'].iloc[-1]
+        prev_price = df['close'].iloc[-2]
+
+        if direction == "SELL": # Bearish Divergence
+            if highs[-1] > highs[-2] and last_price < prev_price:
+                return True
+        elif direction == "BUY": # Bullish Divergence
+            if lows[-1] < lows[-2] and last_price > prev_price:
+                return True
+    except:
+        return False
+    return False
+
 def check_daily_loss():
     global daily_start_balance, daily_date, trading_disabled_today
     now = datetime.now(WIB).date()
@@ -864,49 +887,67 @@ def update_market_bias(choch, trend):
             bias_changed = True
     return market_bias, bias_changed
 
+# ===================== FINAL SCORING LOGIC (HANYA TRIGGER & ZONE) =====================
 def calculate_signal_score(direction, conditions, df):
     score = 0
     met_conditions = []
-    checks = [
-        ("ENGULFING", direction == "BUY" and conditions.get('engulfing_buy') or direction == "SELL" and conditions.get('engulfing_sell')),
-        ("ZONE", direction == "BUY" and conditions.get('in_demand_zone') or direction == "SELL" and conditions.get('in_supply_zone')),
-        ("SWEEP", direction == "BUY" and conditions.get('sweep_buy') or direction == "SELL" and conditions.get('sweep_sell')),
-        ("BOS", conditions.get('bos') == ("BULL_BOS" if direction == "BUY" else "BEAR_BOS")),
-        ("TREND/BIAS", False),
-    ]
-    trend_ok = (direction == "BUY" and (conditions.get('trend') == "BULLISH" or conditions.get('bias') == "BULLISH")) or (direction == "SELL" and (conditions.get('trend') == "BEARISH" or conditions.get('bias') == "BEARISH"))
-    checks[4] = ("TREND/BIAS", trend_ok)
-    pin = detect_pinbar(df)
+    
+    # --- 1. ZONE (WAJIB ADA, tapi dapat 1 poin jika terpenuhi) ---
+    # Tapi syarat "Wajib" di cek di check_mandatory_smc.
+    zone_ok = (direction == "BUY" and conditions.get('in_demand_zone')) or (direction == "SELL" and conditions.get('in_supply_zone'))
+    if zone_ok:
+        score += 1
+        met_conditions.append("ZONE")
+
+    # --- 2. SWEEP (Bobot 2) ---
+    sweep_ok = (direction == "BUY" and conditions.get('sweep_buy')) or (direction == "SELL" and conditions.get('sweep_sell'))
+    if sweep_ok:
+        score += 2
+        met_conditions.append("SWEEP")
+
+    # --- 3. REJECTION (Bobot 2) ---
     wick = detect_rejection_wick(df)
-    ob = detect_order_block(df)
-    fvg = detect_fvg(df)
-    checks += [
-        ("PINBAR", pin == ("BULL" if direction == "BUY" else "BEAR")),
-        ("REJECTION", wick == ("BULL" if direction == "BUY" else "BEAR")),
-        ("ORDERBLOCK", ob == ("BULL" if direction == "BUY" else "BEAR")),
-        ("FVG", fvg == ("BULL" if direction == "BUY" else "BEAR")),
-        ("ATR", bool(conditions.get("atr_ok"))),
-        ("NO_FAKEBREAK", bool(conditions.get("not_fakeout"))),
-        ("SESSION", bool(conditions.get("in_session"))),
-        ("HTF", conditions.get("htf_trend") == ("BULLISH" if direction == "BUY" else "BEARISH")),
-    ]
-    for name, ok in checks:
-        if ok:
-            score += 1
-            met_conditions.append(name)
+    pin = detect_pinbar(df)
+    rejection_ok = (wick == ("BULL" if direction == "BUY" else "BEAR")) or (pin == ("BULL" if direction == "BUY" else "BEAR"))
+    if rejection_ok:
+        score += 2
+        met_conditions.append("REJECTION")
+
+    # --- 4. DIVERGENCE (Bobot 2) ---
+    div_ok = detect_divergence(df, direction)
+    if div_ok:
+        score += 2
+        met_conditions.append("DIVERGENCE")
+
+    # --- 5. CHOCH & BOS (Bonus 1 poin, karena telat, TIDAK WAJIB) ---
+    choch_ok = conditions.get('choch') == ("BULL_CHoCH" if direction == "BUY" else "BEAR_CHoCH")
+    bos_ok = conditions.get('bos') == ("BULL_BOS" if direction == "BUY" else "BEAR_BOS")
+    if choch_ok:
+        score += 1
+        met_conditions.append("CHOCH")
+    if bos_ok:
+        score += 1
+        met_conditions.append("BOS")
+
     return score, met_conditions
 
-def check_mandatory_smc(direction, bos, choch, in_zone):
+# ===================== FINAL MANDATORY LOGIC (GATE) =====================
+def check_mandatory_smc(direction, bos, choch, in_zone, sweep, rejection, divergence):
     if not USE_MANDATORY_SMC:
         return True
-    if direction == "BUY":
-        has_choch = choch == "BULL_CHoCH"
-        has_bos = bos == "BULL_BOS"
-    else:
-        has_choch = choch == "BEAR_CHoCH"
-        has_bos = bos == "BEAR_BOS"
-    conditions_met = sum([has_choch, has_bos, bool(in_zone)])
-    return conditions_met >= 2
+    
+    # 1. WAJIB ada Zona
+    if not in_zone:
+        return False
+    
+    # 2. WAJIB ada minimal 2 dari 3: Sweep, Rejection, Divergence
+    trigger_points = sum([bool(sweep), bool(rejection), bool(divergence)])
+    if trigger_points < 2:
+        return False
+
+    # 3. Jika Zona ada dan 2 trigger ada, sinyal VALID.
+    # CHoCH/BOS tidak wajib, tapi jika sudah ada, mereka sudah masuk ke skor sebagai bonus.
+    return True
 
 def check_confluence(htf_trend, direction):
     if not USE_CONFLUENCE_CHECK:
@@ -1287,10 +1328,23 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
         
             smart_sweep_buy = smart_liquidity_sweep(df, "BUY")
             smart_sweep_sell = smart_liquidity_sweep(df, "SELL")
+            
+            # Dapatkan status Rejection dan Divergence 
+            div_buy = detect_divergence(df, "BUY")
+            div_sell = detect_divergence(df, "SELL")
+            rej_buy = detect_rejection_wick(df)
+            rej_sell = detect_rejection_wick(df)
+            pin_buy = detect_pinbar(df)
+            pin_sell = detect_pinbar(df)
+            
+            # Gabungkan Rejection (Wick atau Pinbar)
+            rej_status_buy = rej_buy == "BULL" or pin_buy == "BULL"
+            rej_status_sell = rej_sell == "BEAR" or pin_sell == "BEAR"
+            
             fakeout = fake_breakout_filter(df)
             daily_pnl, daily_loss_percent = check_daily_loss()
 
-            # ===== SCORING =====
+            # ===== SCORING (FILTER & TRIGGER DIPISAH) =====
             buy_ready = False
             sell_ready = False
             buy_score = 0
@@ -1315,55 +1369,44 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 'htf_trend': htf_trend
             }
         
-            if USE_SCORING_SYSTEM:
-                buy_score, buy_met = calculate_signal_score("BUY", base_conditions, df)
-                sell_score, sell_met = calculate_signal_score("SELL", base_conditions, df)
+            # 1. Hitung Skor (Hanya Zona + Sweep + Rej + Div + CHoCH/BOS)
+            buy_score, buy_met = calculate_signal_score("BUY", base_conditions, df)
+            sell_score, sell_met = calculate_signal_score("SELL", base_conditions, df)
             
-                mandatory_buy_ok = check_mandatory_smc("BUY", bos, choch, in_demand_zone)
-                mandatory_sell_ok = check_mandatory_smc("SELL", bos, choch, in_supply_zone)
-                confluence_buy = check_confluence(htf_trend, "BUY")
-                confluence_sell = check_confluence(htf_trend, "SELL")
+            # 2. Cek Mandatory SMC (Wajib Zona + minimal 2 trigger pucuk)
+            mandatory_buy_ok = check_mandatory_smc("BUY", bos, choch, in_demand_zone, smart_sweep_buy, rej_status_buy, div_buy)
+            mandatory_sell_ok = check_mandatory_smc("SELL", bos, choch, in_supply_zone, smart_sweep_sell, rej_status_sell, div_sell)
             
-                if USE_MANDATORY_SMC or USE_CONFLUENCE_CHECK:
-                    buy_ready = buy_score >= MIN_SCORE_FOR_ENTRY and mandatory_buy_ok and confluence_buy
-                    sell_ready = sell_score >= MIN_SCORE_FOR_ENTRY and mandatory_sell_ok and confluence_sell
-                else:
-                    buy_ready = buy_score >= MIN_SCORE_FOR_ENTRY
-                    sell_ready = sell_score >= MIN_SCORE_FOR_ENTRY
+            # 3. Cek Konfluensi HTF (Filter Gate)
+            confluence_buy = check_confluence(htf_trend, "BUY")
+            confluence_sell = check_confluence(htf_trend, "SELL")
             
-                buy_conditions = {'score': buy_score, 'met': buy_met}
-                sell_conditions = {'score': sell_score, 'met': sell_met}
-            else:
-                buy_ready = True
-                sell_ready = True
+            # 4. Cek Filter GATE (TREND, ATR, SESSION, FAKEBREAK) - HANYA ON/OFF, TIDAK MENAMBAH SKOR
+            filter_buy_ok = True
+            filter_sell_ok = True
             
-                if USE_TREND_FILTER:
-                    buy_ready = buy_ready and (trend == "BULLISH" or current_bias == "BULLISH")
-                    sell_ready = sell_ready and (trend == "BEARISH" or current_bias == "BEARISH")
-                if USE_ENGULFING:
-                    buy_ready = buy_ready and engulf_buy
-                    sell_ready = sell_ready and engulf_sell
-                if USE_ATR_FILTER:
-                    buy_ready = buy_ready and atr_ok
-                    sell_ready = sell_ready and atr_ok
-                if USE_SMC_SUPPLY_DEMAND:
-                    buy_ready = buy_ready and in_demand_zone
-                    sell_ready = sell_ready and in_supply_zone
-                if USE_SMART_SWEEP:
-                    buy_ready = buy_ready and smart_sweep_buy
-                    sell_ready = sell_ready and smart_sweep_sell
-                if USE_FAKE_BREAK_FILTER:
-                    buy_ready = buy_ready and (not fakeout)
-                    sell_ready = sell_ready and (not fakeout)
-                if USE_BOS:
-                    buy_ready = buy_ready and (bos == "BULL_BOS")
-                    sell_ready = sell_ready and (bos == "BEAR_BOS")
-                if USE_CHOCH:
-                    buy_ready = buy_ready and (choch == "BULL_CHoCH")
-                    sell_ready = sell_ready and (choch == "BEAR_CHoCH")
-                if USE_SESSION_FILTER:
-                    buy_ready = buy_ready and session_ok
-                    sell_ready = sell_ready and session_ok
+            if USE_TREND_FILTER:
+                filter_buy_ok = filter_buy_ok and (trend == "BULLISH" or current_bias == "BULLISH")
+                filter_sell_ok = filter_sell_ok and (trend == "BEARISH" or current_bias == "BEARISH")
+            
+            if USE_ATR_FILTER:
+                filter_buy_ok = filter_buy_ok and atr_ok
+                filter_sell_ok = filter_sell_ok and atr_ok
+            
+            if USE_SESSION_FILTER:
+                filter_buy_ok = filter_buy_ok and session_ok
+                filter_sell_ok = filter_sell_ok and session_ok
+                
+            if USE_FAKE_BREAK_FILTER:
+                filter_buy_ok = filter_buy_ok and (not fakeout)
+                filter_sell_ok = filter_sell_ok and (not fakeout)
+
+            # FINAL DECISION
+            buy_ready = buy_score >= MIN_SCORE_FOR_ENTRY and mandatory_buy_ok and confluence_buy and filter_buy_ok
+            sell_ready = sell_score >= MIN_SCORE_FOR_ENTRY and mandatory_sell_ok and confluence_sell and filter_sell_ok
+
+            buy_conditions = {'score': buy_score, 'met': buy_met}
+            sell_conditions = {'score': sell_score, 'met': sell_met}
 
             current_sl_points = calculate_dynamic_sl()
         
