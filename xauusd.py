@@ -63,8 +63,8 @@ DEFAULT_CONFIG = {
     "USE_CANDLE_CONFIRMATION": False,
     "CONFIRMATION_LOOKBACK": 1,
     "USE_SCORING_SYSTEM": True,
-    "MIN_SCORE_FOR_ENTRY": 4, # Karena hanya Sweep, Rej, Div, Zona yang masuk skor
-    "MAX_SCORE": 10, 
+    "MIN_SCORE_FOR_ENTRY": 6, 
+    "MAX_SCORE": 15, 
     "SMC_ZONE_SENSITIVITY": 0.22,
     "SMC_MAX_ZONES": 5,
     "SWEEP_LOOKBACK": 15,
@@ -100,12 +100,8 @@ def _deep_merge(default, current):
 def load_or_create_config(path=CONFIG_FILE):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-
     if not path.exists():
-        path.write_text(
-            json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False) + "\n",
-            encoding="utf-8"
-        )
+        path.write_text(json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
         print("✅ Config file created successfully!")
         print(f"   📁 {path}")
         return dict(DEFAULT_CONFIG)
@@ -122,24 +118,18 @@ def load_or_create_config(path=CONFIG_FILE):
             print(f"⚠️ Config corrupted, backed up to: {backup}")
         except OSError:
             pass
-        path.write_text(
-            json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False) + "\n",
-            encoding="utf-8"
-        )
+        path.write_text(json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
         print("✅ New config file created (recovered from default)")
         return dict(DEFAULT_CONFIG)
 
     merged = _deep_merge(DEFAULT_CONFIG, current)
     if merged != current:
-        path.write_text(
-            json.dumps(merged, indent=4, ensure_ascii=False) + "\n",
-            encoding="utf-8"
-        )
+        path.write_text(json.dumps(merged, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"✅ Config updated with new default values: {path}")
     return merged
 
 print("=" * 60)
-print("🚀 WEENfx PRO SMC SCALPER (FINAL LOGIC)")
+print("🚀 WEENfx PRO SMC SCALPER (CLEAN UI - FINAL)")
 print("=" * 60)
 
 CONFIG = load_or_create_config()
@@ -152,7 +142,6 @@ from datetime import datetime
 import pytz
 import time
 from colorama import init, Fore, Style
-
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
@@ -191,7 +180,6 @@ apply_config(CONFIG)
 SESSION_CONFIG = CONFIG.get("SESSION_FILTER", DEFAULT_CONFIG["SESSION_FILTER"])
 WIB = pytz.timezone(CONFIG.get("SESSION_TIMEZONE", "Asia/Jakarta"))
 SESSION_STATUS = "OUT OF SESSION"
-
 TP_POINTS = SL_POINTS * RR_RATIO
 
 # ===================== STATE VARIABLES =====================
@@ -208,11 +196,9 @@ locked_buy_conditions = {}
 locked_sell_conditions = {}
 is_locked = False
 
-# ===================== ZONE LOCK (PREVENT GOCEK) =====================
+# ===================== ZONE (TANPA LOCK) =====================
 locked_demand_zones = []
 locked_supply_zones = []
-zone_locked_candle_time = None
-zone_check_price = None
 
 # ===================== CONNECT MT5 =====================
 print("⏳ Connecting to MetaTrader 5...")
@@ -280,15 +266,12 @@ def get_higher_timeframe_trend():
     df = get_closed_data(CONFLUENCE_TF, bars=100)
     if df is None or df.empty:
         return "SIDEWAYS"
-    
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
     df['ema100'] = df['close'].ewm(span=100).mean()
-    
     ema20 = df['ema20'].iloc[-1]
     ema50 = df['ema50'].iloc[-1]
     ema100 = df['ema100'].iloc[-1]
-    
     if ema20 > ema50 > ema100:
         return "BULLISH"
     elif ema20 < ema50 < ema100:
@@ -300,7 +283,6 @@ def get_higher_timeframe_trend():
     return "SIDEWAYS"
 
 def engulfing(df, direction):
-    """Detect engulfing pattern on the last two closed candles."""
     if len(df) < 2:
         return False
     prev, curr = df.iloc[-2], df.iloc[-1]
@@ -450,24 +432,6 @@ def price_in_smc_zone(price, zones, zone_type=None):
             continue
     return False, None
 
-# ===================== ZONE LOCK FUNCTIONS =====================
-def lock_zones_at_candle_close(demand_zones, supply_zones, candle_time):
-    """Lock SMC zones at candle close to prevent signal flickering"""
-    global locked_demand_zones, locked_supply_zones, zone_locked_candle_time
-    locked_demand_zones = demand_zones.copy() if demand_zones else []
-    locked_supply_zones = supply_zones.copy() if supply_zones else []
-    zone_locked_candle_time = candle_time
-    return locked_demand_zones, locked_supply_zones
-
-def get_zone_check_price(df, bid):
-    """Get price for zone checking - use close price of last closed candle"""
-    global zone_check_price
-    if df is not None and not df.empty and len(df) >= 1:
-        zone_check_price = df['close'].iloc[-1]
-    else:
-        zone_check_price = bid
-    return zone_check_price
-
 def smart_liquidity_sweep(df, direction):
     if df is None or len(df) < SWEEP_LOOKBACK + 3:
         return False
@@ -572,23 +536,19 @@ def detect_fvg(df):
         return "BEAR"
     return None
 
-# ===================== NEW: DETECT DIVERGENCE =====================
 def detect_divergence(df, direction, lookback=15):
-    """Deteksi Divergence sederhana (Harga High/Low baru, tapi momentum/close tidak mengikuti)"""
     if df is None or len(df) < lookback + 2:
         return False
     try:
         closes = df['close'].tail(lookback).values
         highs = df['high'].tail(lookback).values
         lows = df['low'].tail(lookback).values
-        
         last_price = df['close'].iloc[-1]
         prev_price = df['close'].iloc[-2]
-
-        if direction == "SELL": # Bearish Divergence
+        if direction == "SELL":
             if highs[-1] > highs[-2] and last_price < prev_price:
                 return True
-        elif direction == "BUY": # Bullish Divergence
+        elif direction == "BUY":
             if lows[-1] < lows[-2] and last_price > prev_price:
                 return True
     except:
@@ -660,24 +620,14 @@ def update_existing_positions_sl():
                 new_sl = pos.price_open - atr_sl_points
                 new_sl = round(new_sl, digits)
                 if new_sl < pos.price_open:
-                    result = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": pos.ticket,
-                        "sl": new_sl,
-                        "tp": pos.tp
-                    })
+                    result = mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": pos.ticket, "sl": new_sl, "tp": pos.tp})
                     if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                         runtime_message(f"✅ ATR SL Applied to BUY #{pos.ticket}: Entry={pos.price_open}, New SL={new_sl}")
             else:
                 new_sl = pos.price_open + atr_sl_points
                 new_sl = round(new_sl, digits)
                 if new_sl > pos.price_open:
-                    result = mt5.order_send({
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": pos.ticket,
-                        "sl": new_sl,
-                        "tp": pos.tp
-                    })
+                    result = mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": pos.ticket, "sl": new_sl, "tp": pos.tp})
                     if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                         runtime_message(f"✅ ATR SL Applied to SELL #{pos.ticket}: Entry={pos.price_open}, New SL={new_sl}")
 
@@ -719,11 +669,7 @@ def open_trade(direction):
     price = round(price, digits)
     sl = round(sl, digits)
     tp = round(tp, digits)
-    filling_modes = [
-        mt5.ORDER_FILLING_IOC,
-        mt5.ORDER_FILLING_FOK,
-        mt5.ORDER_FILLING_RETURN
-    ]
+    filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
     for filling in filling_modes:
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -770,21 +716,11 @@ def manage_trailing_sl():
         if pos.type == 0:
             new_sl = pos.price_open + (secure_points / 100)
             if new_sl > pos.sl:
-                mt5.order_send({
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "position": pos.ticket,
-                    "sl": round(new_sl, 3),
-                    "tp": pos.tp
-                })
+                mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": pos.ticket, "sl": round(new_sl, 3), "tp": pos.tp})
         else:
             new_sl = pos.price_open - (secure_points / 100)
             if new_sl < pos.sl or pos.sl == 0:
-                mt5.order_send({
-                    "action": mt5.TRADE_ACTION_SLTP,
-                    "position": pos.ticket,
-                    "sl": round(new_sl, 3),
-                    "tp": pos.tp
-                })
+                mt5.order_send({"action": mt5.TRADE_ACTION_SLTP, "position": pos.ticket, "sl": round(new_sl, 3), "tp": pos.tp})
 
 def manage_break_even():
     if not USE_BREAK_EVEN:
@@ -887,71 +823,106 @@ def update_market_bias(choch, trend):
             bias_changed = True
     return market_bias, bias_changed
 
-# ===================== FINAL SCORING LOGIC (HANYA TRIGGER & ZONE) =====================
+# ===================== FINAL SCORING LOGIC =====================
 def calculate_signal_score(direction, conditions, df):
     score = 0
     met_conditions = []
     
-    # --- 1. ZONE (WAJIB ADA, tapi dapat 1 poin jika terpenuhi) ---
-    # Tapi syarat "Wajib" di cek di check_mandatory_smc.
+    # 1. ZONE (WAJIB, 1 Poin)
     zone_ok = (direction == "BUY" and conditions.get('in_demand_zone')) or (direction == "SELL" and conditions.get('in_supply_zone'))
     if zone_ok:
         score += 1
         met_conditions.append("ZONE")
 
-    # --- 2. SWEEP (Bobot 2) ---
+    # 2. SWEEP (2 Poin)
     sweep_ok = (direction == "BUY" and conditions.get('sweep_buy')) or (direction == "SELL" and conditions.get('sweep_sell'))
     if sweep_ok:
         score += 2
         met_conditions.append("SWEEP")
 
-    # --- 3. REJECTION (Bobot 2) ---
-    wick = detect_rejection_wick(df)
-    pin = detect_pinbar(df)
-    rejection_ok = (wick == ("BULL" if direction == "BUY" else "BEAR")) or (pin == ("BULL" if direction == "BUY" else "BEAR"))
-    if rejection_ok:
+    # 3. REJECTION WICK (2 Poin)
+    wick_ok = (conditions.get('rejection_buy') if direction == "BUY" else conditions.get('rejection_sell'))
+    if wick_ok:
         score += 2
-        met_conditions.append("REJECTION")
+        met_conditions.append("REJECT")
 
-    # --- 4. DIVERGENCE (Bobot 2) ---
-    div_ok = detect_divergence(df, direction)
+    # 4. PINBAR (2 Poin)
+    pin_ok = (conditions.get('pinbar_buy') if direction == "BUY" else conditions.get('pinbar_sell'))
+    if pin_ok:
+        score += 2
+        met_conditions.append("PINBAR")
+
+    # 5. DIVERGENCE (2 Poin)
+    div_ok = (conditions.get('divergence_buy') if direction == "BUY" else conditions.get('divergence_sell'))
     if div_ok:
         score += 2
         met_conditions.append("DIVERGENCE")
 
-    # --- 5. CHOCH & BOS (Bonus 1 poin, karena telat, TIDAK WAJIB) ---
+    # 6. CHOCH (1 Poin)
     choch_ok = conditions.get('choch') == ("BULL_CHoCH" if direction == "BUY" else "BEAR_CHoCH")
-    bos_ok = conditions.get('bos') == ("BULL_BOS" if direction == "BUY" else "BEAR_BOS")
     if choch_ok:
         score += 1
         met_conditions.append("CHOCH")
+
+    # 7. BOS (1 Poin)
+    bos_ok = conditions.get('bos') == ("BULL_BOS" if direction == "BUY" else "BEAR_BOS")
     if bos_ok:
         score += 1
         met_conditions.append("BOS")
 
+    # 8. ENGULFING (1 Poin)
+    eng_ok = (conditions.get('engulfing_buy') if direction == "BUY" else conditions.get('engulfing_sell'))
+    if eng_ok:
+        score += 1
+        met_conditions.append("ENGULF")
+
+    # 9. ORDER BLOCK (1 Poin)
+    ob_ok = (conditions.get('ob_buy') if direction == "BUY" else conditions.get('ob_sell'))
+    if ob_ok:
+        score += 1
+        met_conditions.append("OB")
+
+    # 10. FVG (1 Poin)
+    fvg_ok = (conditions.get('fvg_buy') if direction == "BUY" else conditions.get('fvg_sell'))
+    if fvg_ok:
+        score += 1
+        met_conditions.append("FVG")
+
+    # 11. TREND (1 Poin)
+    trend_ok = (direction == "BUY" and conditions.get('trend') == "BULLISH") or (direction == "SELL" and conditions.get('trend') == "BEARISH")
+    if trend_ok:
+        score += 1
+        met_conditions.append("TREND")
+
+    # 12. HTF (1 Poin)
+    htf_ok = (direction == "BUY" and conditions.get('htf_trend') == "BULLISH") or (direction == "SELL" and conditions.get('htf_trend') == "BEARISH")
+    if htf_ok:
+        score += 1
+        met_conditions.append("HTF")
+
+    # 13. CONFLUENCE (1 Poin)
+    confluence_ok = conditions.get('confluence')
+    if confluence_ok:
+        score += 1
+        met_conditions.append("CONFLUENCE")
+
     return score, met_conditions
 
 # ===================== FINAL MANDATORY LOGIC (GATE) =====================
-def check_mandatory_smc(direction, bos, choch, in_zone, sweep, rejection, divergence):
+def check_mandatory_smc(direction, in_zone, sweep, rejection, divergence):
     if not USE_MANDATORY_SMC:
         return True
     
-    # 1. WAJIB ada Zona
     if not in_zone:
         return False
     
-    # 2. WAJIB ada minimal 2 dari 3: Sweep, Rejection, Divergence
     trigger_points = sum([bool(sweep), bool(rejection), bool(divergence)])
     if trigger_points < 2:
         return False
 
-    # 3. Jika Zona ada dan 2 trigger ada, sinyal VALID.
-    # CHoCH/BOS tidak wajib, tapi jika sudah ada, mereka sudah masuk ke skor sebagai bonus.
     return True
 
 def check_confluence(htf_trend, direction):
-    if not USE_CONFLUENCE_CHECK:
-        return True
     if direction == "BUY":
         return htf_trend == "BULLISH"
     else:
@@ -984,13 +955,13 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
                           current_sl_points, current_session, active_sessions_text,
                           session_trade_allowed, trend, htf_trend, current_bias,
                           atr_val, atr_ok, buy_ready, sell_ready, buy_score, sell_score,
-                          pending_direction, smart_sweep_buy, smart_sweep_sell,
+                          smart_sweep_buy, smart_sweep_sell,
                           choch, bos, engulf_buy, engulf_sell, in_supply_zone,
                           in_demand_zone, pinbar_status, wick_status, ob_status, fvg_status,
                           fakeout, daily_pnl, daily_loss_percent, trading_disabled_today,
                           buy_conditions, sell_conditions, is_locked, locked_signal,
                           locked_buy_score, locked_sell_score, locked_candle_time,
-                          zone_locked):
+                          div_status_buy, div_status_sell):
     now = datetime.now(WIB).strftime("%H:%M:%S WIB")
     trade_txt = Text("● ON", style="bold green") if USE_AUTO_TRADE else Text("○ OFF", style="bold red")
     tp_txt = Text("● ON", style="green") if USE_TAKE_PROFIT else Text("○ OFF", style="red")
@@ -1051,8 +1022,6 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
     
     signal.add_row("BUY", rich_signal(buy_ready,buy_score,MAX_SCORE))
     signal.add_row("SELL", rich_signal(sell_ready,sell_score,MAX_SCORE))
-    confirm = "PENDING BUY" if pending_direction=="BUY" else "PENDING SELL" if pending_direction=="SELL" else "OFF"
-    signal.add_row("Confirm", Text(confirm, style="yellow" if pending_direction else "dim"))
     signal.add_row("Minimum", Text(f"{MIN_SCORE_FOR_ENTRY}/{MAX_SCORE}"))
     if is_locked and locked_signal == "BUY":
         signal.add_row("BUY+", Text(", ".join(locked_buy_conditions.get("met",[])) or "—", style="green"))
@@ -1071,7 +1040,7 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
     smc.add_row("Engulf", Text(f"{'✓' if engulf_buy else '✗'} / {'✓' if engulf_sell else '✗'}"))
     zone="SUPPLY" if in_supply_zone else "DEMAND" if in_demand_zone else "—"
     smc.add_row("Zone", Text(zone, style="red" if zone=="SUPPLY" else "green" if zone=="DEMAND" else "yellow"))
-    smc.add_row("ZoneLock", Text("🔒 ON" if zone_locked else "OFF", style="green" if zone_locked else "yellow"))
+    smc.add_row("Div", Text(f"{'BULL' if div_status_buy else 'BEAR' if div_status_sell else '—'}", style="green" if div_status_buy else "red" if div_status_sell else "yellow"))
     smc.add_row("PinBar", rich_pattern(pinbar_status))
     smc.add_row("Reject", rich_pattern(wick_status))
     smc.add_row("OB", rich_pattern(ob_status))
@@ -1154,14 +1123,6 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
         Panel(sess, title="🕐 SESSION", border_style="yellow", expand=True),
     )
 
-    patterns=Text()
-    patterns.append("PinBar ",style="cyan"); patterns.append(str(pinbar_status or "—"),style="green" if pinbar_status=="BULL" else "red" if pinbar_status=="BEAR" else "yellow")
-    patterns.append(" │ Reject "); patterns.append(str(wick_status or "—"),style="green" if wick_status=="BULL" else "red" if wick_status=="BEAR" else "yellow")
-    patterns.append(" │ OB "); patterns.append(str(ob_status or "—"),style="green" if ob_status=="BULL" else "red" if ob_status=="BEAR" else "yellow")
-    patterns.append(" │ FVG "); patterns.append(str(fvg_status or "—"),style="green" if fvg_status=="BULL" else "red" if fvg_status=="BEAR" else "yellow")
-    patterns.append(f" │ S/D {'SUPPLY' if in_supply_zone else 'DEMAND' if in_demand_zone else '—'}")
-    patterns.append(f" │ Sweep {'●' if USE_SMART_SWEEP else '○'} │ BOS {'●' if USE_BOS else '○'} │ CHoCH {'●' if USE_CHOCH else '○'}")
-
     account_text=Text()
     bal=float(account.balance) if account else 0.0; eq=float(account.equity) if account else 0.0
     account_text.append(f"Balance ${bal:.2f} │ Equity ${eq:.2f} │ Daily P/L ",style="white")
@@ -1185,7 +1146,6 @@ def render_rich_dashboard(*, account, positions, bid, ask, price_direction,
         top,
         Panel(pos_group,title=f"💼 OPEN POSITIONS  {len(positions) if positions else 0}/{maxpos}",border_style="white",padding=(0,1)),
         bottom,
-        Panel(patterns,title="🧩 PATTERNS",border_style="magenta",padding=(0,1)),
         Panel(account_text,title="💰 ACCOUNT",border_style="green",padding=(0,1)),
         Panel(status_text,title="STATUS",border_style="cyan",padding=(0,1))
     ]
@@ -1204,7 +1164,7 @@ print(f"   Entry TF: {TIMEFRAME_ENTRY}")
 print(f"   SMC TF: {TIMEFRAME_SMC}")
 print(f"   Auto Trade: {'ON' if USE_AUTO_TRADE else 'OFF'}")
 print(f"   Closed Candle Lock: {'ON' if USE_CLOSED_CANDLE_LOCK else 'OFF'}")
-print(f"   Zone Lock: {'ON' if USE_SMC_SUPPLY_DEMAND else 'OFF'}")
+print(f"   Session Filter: {'ON' if USE_SESSION_FILTER else 'OFF'}")
 print("=" * 60)
 print("⏳ Press Ctrl+C to stop")
 print("=" * 60)
@@ -1218,16 +1178,9 @@ supply_zones = []
 last_bid = None
 price_direction = ""
 last_smc_update = time.time()
-pending_direction = None
-
-# Cooldown tracking
 last_buy_time = 0
 last_sell_time = 0
-
-# Track last SL update
 last_sl_update = time.time()
-
-# Initialize candle detection
 last_candle_time = get_last_closed_candle_time(TIMEFRAME_ENTRY)
 
 with Live(console=console, refresh_per_second=4, screen=True, transient=False) as live:
@@ -1245,7 +1198,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
     while True:
         try:
             current_time = time.time()
-            
             if not mt5.account_info():
                 runtime_message("⚠ Reconnecting MT5...")
                 mt5.initialize()
@@ -1259,7 +1211,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 continue
 
             bid, ask = get_live_price()
-        
             if bid and last_bid:
                 if bid > last_bid:
                     price_direction = "▲"
@@ -1271,8 +1222,7 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
 
             new_candle = is_new_candle_mt5(TIMEFRAME_ENTRY)
             session_ok = in_session()
-        
-            # Update SMC zones every 60 seconds (using CLOSED candle data)
+            
             if USE_SMC_SUPPLY_DEMAND and (current_time - last_smc_update > 60):
                 df_smc = get_closed_data(TIMEFRAME_SMC, bars=500)
                 if df_smc is not None and not df_smc.empty:
@@ -1280,12 +1230,10 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                     supply_zones = detect_supply_zones(df_smc, SMC_ZONE_SENSITIVITY)                            
                 last_smc_update = current_time
 
-            # Update ATR SL for existing positions
             if USE_ATR_SL_EXISTING and (current_time - last_sl_update > 60):
                 update_existing_positions_sl()
                 last_sl_update = current_time
 
-            # ===== INDICATORS =====
             trend = trend_m5()
             htf_trend = get_higher_timeframe_trend() if USE_CONFLUENCE_CHECK else "SIDEWAYS"
             
@@ -1305,31 +1253,25 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             choch = detect_choch(df)
             current_bias, bias_just_changed = update_market_bias(choch, trend)
         
-            # ===== SMC ZONES - WITH ZONE LOCK (PREVENT GOCEK) =====
             in_demand_zone = False
             in_supply_zone = False
-            zone_locked = False
 
             if USE_SMC_SUPPLY_DEMAND:
-                # Lock zone di awal candle M5
-                if new_candle:
-                    current_candle_time = get_last_closed_candle_time(TIMEFRAME_ENTRY)
-                    lock_zones_at_candle_close(demand_zones, supply_zones, current_candle_time)
-                    zone_check_price = get_zone_check_price(df, bid)
-                    zone_locked = True
-                    runtime_message(f"🔒 ZONE LOCKED at {time.strftime('%H:%M', time.gmtime(current_candle_time)) if current_candle_time else '--'}")
+                # 1. CLOSE CANDLE (Untuk Skor & Mandatory)
+                zone_check_price = df['close'].iloc[-1]
+                signal_in_demand_zone, _ = price_in_smc_zone(zone_check_price, demand_zones, "DEMAND")
+                signal_in_supply_zone, _ = price_in_smc_zone(zone_check_price, supply_zones, "SUPPLY")
                 
-                # Gunakan locked zone dan harga yang sudah dilock untuk seluruh candle
-                check_price = zone_check_price if zone_check_price is not None else bid
-                if check_price and locked_demand_zones:
-                    in_demand_zone, _ = price_in_smc_zone(check_price, locked_demand_zones, "DEMAND")
-                    in_supply_zone, _ = price_in_smc_zone(check_price, locked_supply_zones, "SUPPLY")
-                    zone_locked = True
+                # 2. LIVE PRICE (Untuk Eksekusi)
+                execution_in_demand_zone, _ = price_in_smc_zone(bid, demand_zones, "DEMAND")
+                execution_in_supply_zone, _ = price_in_smc_zone(bid, supply_zones, "SUPPLY")
+            else:
+                signal_in_demand_zone = signal_in_supply_zone = False
+                execution_in_demand_zone = execution_in_supply_zone = False
         
             smart_sweep_buy = smart_liquidity_sweep(df, "BUY")
             smart_sweep_sell = smart_liquidity_sweep(df, "SELL")
             
-            # Dapatkan status Rejection dan Divergence 
             div_buy = detect_divergence(df, "BUY")
             div_sell = detect_divergence(df, "SELL")
             rej_buy = detect_rejection_wick(df)
@@ -1337,14 +1279,19 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             pin_buy = detect_pinbar(df)
             pin_sell = detect_pinbar(df)
             
-            # Gabungkan Rejection (Wick atau Pinbar)
-            rej_status_buy = rej_buy == "BULL" or pin_buy == "BULL"
-            rej_status_sell = rej_sell == "BEAR" or pin_sell == "BEAR"
+            rej_status_buy = rej_buy == "BULL"
+            rej_status_sell = rej_sell == "BEAR"
+            pin_status_buy = pin_buy == "BULL"
+            pin_status_sell = pin_sell == "BEAR"
+            
+            ob_buy = ob_status == "BULL"
+            ob_sell = ob_status == "BEAR"
+            fvg_buy = fvg_status == "BULL"
+            fvg_sell = fvg_status == "BEAR"
             
             fakeout = fake_breakout_filter(df)
             daily_pnl, daily_loss_percent = check_daily_loss()
 
-            # ===== SCORING (FILTER & TRIGGER DIPISAH) =====
             buy_ready = False
             sell_ready = False
             buy_score = 0
@@ -1352,75 +1299,81 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             buy_conditions = {}
             sell_conditions = {}
         
+            # HITUNG CONFLUENCE (TIDAK MEMBLOKIR, HANYA BONUS POIN)
+            confluence_buy = check_confluence(htf_trend, "BUY")
+            confluence_sell = check_confluence(htf_trend, "SELL")
+
             base_conditions = {
-                'engulfing_buy': engulf_buy,
-                'engulfing_sell': engulf_sell,
-                'in_demand_zone': in_demand_zone,
-                'in_supply_zone': in_supply_zone,
+                'in_demand_zone': signal_in_demand_zone,
+                'in_supply_zone': signal_in_supply_zone,
                 'sweep_buy': smart_sweep_buy,
                 'sweep_sell': smart_sweep_sell,
+                'rejection_buy': rej_status_buy,
+                'rejection_sell': rej_status_sell,
+                'pinbar_buy': pin_status_buy,
+                'pinbar_sell': pin_status_sell,
+                'divergence_buy': div_buy,
+                'divergence_sell': div_sell,
                 'bos': bos,
                 'choch': choch,
+                'ob_buy': ob_buy,
+                'ob_sell': ob_sell,
+                'fvg_buy': fvg_buy,
+                'fvg_sell': fvg_sell,
                 'trend': trend,
-                'bias': current_bias,
-                'not_fakeout': not fakeout,
-                'atr_ok': atr_ok,
-                'in_session': session_ok,
-                'htf_trend': htf_trend
+                'htf_trend': htf_trend,
+                'confluence': False # Placeholder
             }
         
-            # 1. Hitung Skor (Hanya Zona + Sweep + Rej + Div + CHoCH/BOS)
+            # Hitung Score untuk Buy dan Sell secara terpisah
             buy_score, buy_met = calculate_signal_score("BUY", base_conditions, df)
             sell_score, sell_met = calculate_signal_score("SELL", base_conditions, df)
             
-            # 2. Cek Mandatory SMC (Wajib Zona + minimal 2 trigger pucuk)
-            mandatory_buy_ok = check_mandatory_smc("BUY", bos, choch, in_demand_zone, smart_sweep_buy, rej_status_buy, div_buy)
-            mandatory_sell_ok = check_mandatory_smc("SELL", bos, choch, in_supply_zone, smart_sweep_sell, rej_status_sell, div_sell)
+            # Tambahkan poin confluence langsung jika sesuai arah
+            if confluence_buy:
+                buy_score += 1
+                buy_met.append("CONFLUENCE")
+            if confluence_sell:
+                sell_score += 1
+                sell_met.append("CONFLUENCE")
+
+            # Mandatory: Zona (Close) + 2 Trigger
+            mandatory_buy_ok = check_mandatory_smc("BUY", signal_in_demand_zone, smart_sweep_buy, rej_status_buy, div_buy)
+            mandatory_sell_ok = check_mandatory_smc("SELL", signal_in_supply_zone, smart_sweep_sell, rej_status_sell, div_sell)
             
-            # 3. Cek Konfluensi HTF (Filter Gate)
-            confluence_buy = check_confluence(htf_trend, "BUY")
-            confluence_sell = check_confluence(htf_trend, "SELL")
-            
-            # 4. Cek Filter GATE (TREND, ATR, SESSION, FAKEBREAK) - HANYA ON/OFF, TIDAK MENAMBAH SKOR
             filter_buy_ok = True
             filter_sell_ok = True
             
-            if USE_TREND_FILTER:
-                filter_buy_ok = filter_buy_ok and (trend == "BULLISH" or current_bias == "BULLISH")
-                filter_sell_ok = filter_sell_ok and (trend == "BEARISH" or current_bias == "BEARISH")
+            # SESSION = HARD GATE! Jika tidak aktif, bot TIDAK AKAN PERNAH ENTRY.
+            if USE_SESSION_FILTER:
+                filter_buy_ok = filter_buy_ok and session_ok
+                filter_sell_ok = filter_sell_ok and session_ok
             
             if USE_ATR_FILTER:
                 filter_buy_ok = filter_buy_ok and atr_ok
                 filter_sell_ok = filter_sell_ok and atr_ok
-            
-            if USE_SESSION_FILTER:
-                filter_buy_ok = filter_buy_ok and session_ok
-                filter_sell_ok = filter_sell_ok and session_ok
                 
             if USE_FAKE_BREAK_FILTER:
                 filter_buy_ok = filter_buy_ok and (not fakeout)
                 filter_sell_ok = filter_sell_ok and (not fakeout)
 
             # FINAL DECISION
-            buy_ready = buy_score >= MIN_SCORE_FOR_ENTRY and mandatory_buy_ok and confluence_buy and filter_buy_ok
-            sell_ready = sell_score >= MIN_SCORE_FOR_ENTRY and mandatory_sell_ok and confluence_sell and filter_sell_ok
+            buy_ready = buy_score >= MIN_SCORE_FOR_ENTRY and mandatory_buy_ok and filter_buy_ok and execution_in_demand_zone
+            sell_ready = sell_score >= MIN_SCORE_FOR_ENTRY and mandatory_sell_ok and filter_sell_ok and execution_in_supply_zone
 
             buy_conditions = {'score': buy_score, 'met': buy_met}
             sell_conditions = {'score': sell_score, 'met': sell_met}
 
             current_sl_points = calculate_dynamic_sl()
         
-            # Cooldown
             if buy_ready and (current_time - last_buy_time < SIGNAL_COOLDOWN):
                 buy_ready = False
             if sell_ready and (current_time - last_sell_time < SIGNAL_COOLDOWN):
                 sell_ready = False
 
-            # ===== CLOSED CANDLE LOCK =====
             if USE_CLOSED_CANDLE_LOCK:
                 if new_candle:
                     current_candle_time = get_last_closed_candle_time(TIMEFRAME_ENTRY)
-                    
                     if buy_ready and not sell_ready:
                         locked_signal = "BUY"
                         locked_buy_score = buy_score
@@ -1447,7 +1400,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 is_locked = False
                 locked_signal = None
 
-            # ===== ENTRY EXECUTION =====
             if USE_CLOSED_CANDLE_LOCK:
                 if is_locked and locked_signal:
                     if not trading_disabled_today and USE_AUTO_TRADE and session_ok:
@@ -1474,7 +1426,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                         open_trade("SELL")
                         last_sell_time = current_time
 
-            # ===== POSITION MANAGEMENT =====
             manage_trailing_sl()
             manage_break_even()
 
@@ -1482,7 +1433,6 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
             positions = mt5.positions_get(symbol=SYMBOL)
             current_session, active_sessions_text, session_trade_allowed = get_session_status_text()
 
-            # ===== UPDATE DASHBOARD =====
             live.update(render_rich_dashboard(
                 account=account, positions=positions, bid=bid, ask=ask,
                 price_direction=price_direction, current_sl_points=current_sl_points,
@@ -1490,10 +1440,9 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 session_trade_allowed=session_trade_allowed, trend=trend, htf_trend=htf_trend,
                 current_bias=current_bias, atr_val=atr_val, atr_ok=atr_ok,
                 buy_ready=buy_ready, sell_ready=sell_ready, buy_score=buy_score,
-                sell_score=sell_score, pending_direction=pending_direction,
-                smart_sweep_buy=smart_sweep_buy, smart_sweep_sell=smart_sweep_sell,
+                sell_score=sell_score, smart_sweep_buy=smart_sweep_buy, smart_sweep_sell=smart_sweep_sell,
                 choch=choch, bos=bos, engulf_buy=engulf_buy, engulf_sell=engulf_sell,
-                in_supply_zone=in_supply_zone, in_demand_zone=in_demand_zone,
+                in_supply_zone=execution_in_supply_zone, in_demand_zone=execution_in_demand_zone,
                 pinbar_status=pinbar_status, wick_status=wick_status,
                 ob_status=ob_status, fvg_status=fvg_status, fakeout=fakeout,
                 daily_pnl=daily_pnl, daily_loss_percent=daily_loss_percent,
@@ -1502,7 +1451,7 @@ with Live(console=console, refresh_per_second=4, screen=True, transient=False) a
                 is_locked=is_locked, locked_signal=locked_signal,
                 locked_buy_score=locked_buy_score, locked_sell_score=locked_sell_score,
                 locked_candle_time=locked_candle_time,
-                zone_locked=zone_locked
+                div_status_buy=div_buy, div_status_sell=div_sell
             ))
 
             time.sleep(1)
